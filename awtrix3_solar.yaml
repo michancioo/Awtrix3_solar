@@ -202,6 +202,26 @@ variables:
   night_start: !input night_starts_after_time
   night_end: !input night_ends_after_time
 
+  # --- NIGHT WINDOW EVAL (ROBUST) ---
+  is_night_now: >-
+    {% set start_s = night_start|string %}
+    {% set end_s   = night_end|string %}
+    {# jeśli start==end → brak okna nocnego #}
+    {% if start_s == end_s %}
+      false
+    {% else %}
+      {% set t_now   = now().time() %}
+      {% set t_start = strptime(start_s, "%H:%M:%S").time() %}
+      {% set t_end   = strptime(end_s,   "%H:%M:%S").time() %}
+      {# przypadek zwykły: np. 22:00–23:30 #}
+      {% if t_start < t_end %}
+        {{ t_now >= t_start and t_now <= t_end }}
+      {% else %}
+        {# zawija przez północ: np. 22:00–06:00 #}
+        {{ t_now >= t_start or  t_now <= t_end }}
+      {% endif %}
+    {% endif %}
+
 trigger:
   - platform: time_pattern
     minutes: !input refresh_minutes
@@ -214,9 +234,8 @@ action:
         conditions:
           - condition: template
             value_template: >
-              {% set now_time = now().strftime("%H:%M") %}
-              {{ (skip_during_night_hours and ((now_time < night_end) or (now_time > night_start))) or
-                 (skip_if_zero_watts and (power_level | float == 0)) }}
+              {{ (skip_during_night_hours and (is_night_now | bool)) or
+                 (skip_if_zero_watts and (power_level | float(0) == 0)) }}
         sequence:
           - repeat:
               for_each: "{{ devices_topics }}"
@@ -229,7 +248,13 @@ action:
                     payload: '{}'
 
       - alias: "Show (notify/app)"
-        conditions: []
+        conditions:
+          - condition: template
+            value_template: >
+              {{ not (
+                  (skip_during_night_hours and (is_night_now | bool)) or
+                  (skip_if_zero_watts and (power_level | float(0) == 0))
+              ) }}
         sequence:
           - repeat:
               for_each: "{{ devices_topics }}"
