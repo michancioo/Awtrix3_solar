@@ -1,6 +1,6 @@
 ---
 blueprint:
-  name: AWTRIX Solar Energy Monitor (AWTRIX 3) – W/kW support
+  name: AWTRIX Solar Energy Monitor (AWTRIX 3) – W/kW + custom refresh
   description: >
     Shows current solar energy on AWTRIX 3.
     Uses icons 54156 (solar-green), 50557 (solar-white-dyn), 50546 (solar-static) that you need to install.
@@ -30,9 +30,7 @@ blueprint:
       description: W jakich jednostkach podaje wartość Twój sensor?
       selector:
         select:
-          options:
-            - W
-            - kW
+          options: [W, kW]
       default: W
 
     threshold_high:
@@ -66,6 +64,18 @@ blueprint:
       name: Night Time End
       default: "00:00:00"
       selector: {time: {}}
+
+    refresh_minutes:
+      name: Refresh pattern (minutes)
+      description: |
+        Wzór dla pola `minutes:` w time_pattern. Przykłady:
+        - "/1"  → co minutę
+        - "/5"  → co 5 minut
+        - "0,15,30,45" → co kwadrans
+      selector:
+        text:
+          multiline: false
+      default: "/1"
 
 mode: single
 
@@ -131,7 +141,7 @@ variables:
 
 trigger:
   - platform: time_pattern
-    minutes: "/1"
+    minutes: !input refresh_minutes
 
 condition: []
 
