@@ -1,9 +1,9 @@
 ---
 blueprint:
-  name: AWTRIX Solar Energy Monitor (AWTRIX 3)
+  name: AWTRIX Solar Energy Monitor (AWTRIX 3) – W/kW support
   description: >
-    This blueprint will show the current solar energy received on AWTRIX 3.
-    It uses icons 54156 (solar-green), 50557 (solar-white-dyn), 50546 (solar-static) that you need to install.
+    Shows current solar energy on AWTRIX 3.
+    Uses icons 54156 (solar-green), 50557 (solar-white-dyn), 50546 (solar-static) that you need to install.
 
   domain: automation
   input:
@@ -16,35 +16,52 @@ blueprint:
           manufacturer: Blueforcer
           model: AWTRIX 3
           multiple: true
+
     power_source:
       name: Power Sensor
-      description: A sensor providing the current power received from your solar system.
+      description: Sensor providing current power from your solar system.
       selector:
         entity:
           domain: [sensor]
           multiple: false
+
+    sensor_unit:
+      name: Sensor unit
+      description: W jakich jednostkach podaje wartość Twój sensor?
+      selector:
+        select:
+          options:
+            - W
+            - kW
+      default: W
+
     threshold_high:
       name: Threshold for high solar production (W)
       selector:
         number: {min: 0, max: 100000, unit_of_measurement: Watt, mode: slider}
       default: 400
+
     threshold_low:
       name: Threshold for low solar production (W)
       selector:
         number: {min: 0, max: 100000, unit_of_measurement: Watt, mode: slider}
       default: 100
+
     skip_if_zero_watts:
       name: Hide solar production if at 0 Watts
       selector: {boolean:}
       default: false
+
     skip_during_night_hours:
       name: Hide solar production during night time
       selector: {boolean:}
       default: false
+
     night_starts_after_time:
       name: Night Time Start
       default: "00:00:00"
       selector: {time: {}}
+
     night_ends_after_time:
       name: Night Time End
       default: "00:00:00"
@@ -54,6 +71,7 @@ mode: single
 
 variables:
   device_ids: !input awtrix
+
   devices_topics: >-
     {%- macro get_device_topic(device_id) -%}
     {{ states((device_entities(device_id) | select('search','device_topic') | list)[0]) }}
@@ -64,28 +82,50 @@ variables:
       {%- set ns.devices = ns.devices + [ device ~ '/custom/solar_power'] -%}
     {%- endfor -%}
     {{ ns.devices }}
+
   power_sensor: !input power_source
-  power_level: "{{ states[power_sensor].state | int(0) | abs }}"
+  sensor_unit: !input sensor_unit
+
+  # surowa wartość z sensora (kW lub W)
+  raw_power: "{{ states[power_sensor].state | float(0) | abs }}"
+
+  # znormalizowana moc do W (jeśli sensor kW -> *1000)
+  power_level: >-
+    {% if sensor_unit == 'kW' %}
+      {{ (raw_power * 1000) | round(0) }}
+    {% else %}
+      {{ raw_power | round(0) }}
+    {% endif %}
+
   threshold_low: !input threshold_low
   threshold_high: !input threshold_high
+
   power_level_icon: >-
-    {%- if power_level > threshold_high -%}54156
-    {%- elif power_level > threshold_low -%}50557
+    {%- if power_level | float > threshold_high | float -%}54156
+    {%- elif power_level | float > threshold_low | float -%}50557
     {%- else -%}50546
     {%- endif -%}
+
   power_level_color: >-
-    {%- if power_level > threshold_high -%}#04FE04
-    {%- elif power_level > threshold_low -%}#FCFEFC
+    {%- if power_level | float > threshold_high | float -%}#04FE04
+    {%- elif power_level | float > threshold_low | float -%}#FCFEFC
     {%- else -%}#FF4E1A
     {%- endif -%}
+
+  # formatowanie tekstu: jeśli > 1000 W, pokazujemy w kW
   power_level_text: >-
-    {%- if power_level > 1000 -%}{{ ((power_level | float(0)) / 1000) | round(1) }} kW
-    {%- else -%}{{ power_level | round(0) }} W
+    {%- if (power_level | float) > 1000 -%}
+      {{ ((power_level | float) / 1000) | round(1) }} kW
+    {%- else -%}
+      {{ (power_level | float) | round(0) }} W
     {%- endif -%}
+
   skip_if_zero_watts: !input skip_if_zero_watts
   skip_during_night_hours: !input skip_during_night_hours
+
   payload: >-
     {"icon":"{{ power_level_icon }}","text":"{{ power_level_text }}","color":"{{ power_level_color }}"}
+
   night_start: !input night_starts_after_time
   night_end: !input night_ends_after_time
 
@@ -103,7 +143,7 @@ action:
             value_template: >
               {% set now_time = now().strftime("%H:%M") %}
               {{ (skip_during_night_hours and ((now_time < night_end) or (now_time > night_start))) or
-                 (skip_if_zero_watts and (power_level == 0)) }}
+                 (skip_if_zero_watts and (power_level | float == 0)) }}
         sequence:
           - repeat:
               for_each: "{{ devices_topics }}"
@@ -114,13 +154,14 @@ action:
                     retain: false
                     topic: "{{ repeat.item }}"
                     payload: '{}'
+
       - alias: "Not skipping"
         conditions:
           - condition: template
             value_template: >
               {% set now_time = now().strftime("%H:%M") %}
               {{ not ((skip_during_night_hours and ((now_time < night_end) or (now_time > night_start))) or
-                      (skip_if_zero_watts and (power_level == 0))) }}
+                      (skip_if_zero_watts and (power_level | float == 0))) }}
         sequence:
           - repeat:
               for_each: "{{ devices_topics }}"
