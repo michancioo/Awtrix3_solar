@@ -1,9 +1,10 @@
 ---
 blueprint:
-  name: AWTRIX Solar Energy Monitor (AWTRIX 3) – W/kW + custom refresh
+  name: AWTRIX Solar Energy Monitor (AWTRIX 3) – W/kW + custom refresh + notify/app
   description: >
-    Shows current solar energy on AWTRIX 3.
-    Uses icons 54156 (solar-green), 50557 (solar-white-dyn), 50546 (solar-static) that you need to install.
+    Periodically shows solar power on AWTRIX 3.
+    Choose display mode: transient notify (popup) or app-in-rotation (with short lifetime).
+    Icons: 54156 (green), 50557 (white dyn), 50546 (static).
 
   domain: automation
   input:
@@ -19,7 +20,6 @@ blueprint:
 
     power_source:
       name: Power Sensor
-      description: Sensor providing current power from your solar system.
       selector:
         entity:
           domain: [sensor]
@@ -27,7 +27,6 @@ blueprint:
 
     sensor_unit:
       name: Sensor unit
-      description: W jakich jednostkach podaje wartość Twój sensor?
       selector:
         select:
           options: [W, kW]
@@ -46,60 +45,86 @@ blueprint:
       default: 100
 
     skip_if_zero_watts:
-      name: Hide solar production if at 0 Watts
+      name: Hide when 0 W
       selector: {boolean:}
       default: false
 
     skip_during_night_hours:
-      name: Hide solar production during night time
+      name: Hide during night time
       selector: {boolean:}
       default: false
 
     night_starts_after_time:
-      name: Night Time Start
+      name: Night start
       default: "00:00:00"
       selector: {time: {}}
 
     night_ends_after_time:
-      name: Night Time End
+      name: Night end
       default: "00:00:00"
       selector: {time: {}}
 
     refresh_minutes:
       name: Refresh pattern (minutes)
       description: |
-        Wzór dla pola `minutes:` w time_pattern. Przykłady:
-        - "/1"  → co minutę
+        Wzór dla `minutes:` w time_pattern. Przykłady:
         - "/5"  → co 5 minut
         - "0,15,30,45" → co kwadrans
+      selector: {text: {multiline: false}}
+      default: "/5"
+
+    display_mode:
+      name: Display mode
+      description: notify = popup jednorazowy; app = krótko do rotacji (lifetime)
       selector:
-        text:
-          multiline: false
-      default: "/1"
+        select:
+          options:
+            - notify
+            - app
+      default: notify
+
+    show_duration_s:
+      name: Show duration (seconds)
+      description: Ile sekund ma być widoczny komunikat.
+      selector:
+        number: {min: 1, max: 120, unit_of_measurement: s, mode: slider}
+      default: 8
+
+    app_lifetime_s:
+      name: (app) Lifetime in queue (seconds)
+      description: Jak długo appka „żyje” w kolejce (po 1 wyświetleniu wygaśnie).
+      selector:
+        number: {min: 1, max: 300, unit_of_measurement: s, mode: slider}
+      default: 20
+
+    app_repeat:
+      name: (app) Repeat count
+      description: Ile razy pokazać w jednej publikacji (zwykle 1).
+      selector:
+        number: {min: 1, max: 5, mode: slider}
+      default: 1
 
 mode: single
 
 variables:
   device_ids: !input awtrix
 
-  devices_topics: >-
+  # z HA pobieramy device_topic każdej wybranej „żarówki”
+  devices_base_topics: >-
     {%- macro get_device_topic(device_id) -%}
     {{ states((device_entities(device_id) | select('search','device_topic') | list)[0]) }}
     {%- endmacro -%}
-    {%- set ns = namespace(devices=[]) -%}
+    {%- set ns = namespace(devs=[]) -%}
     {%- for device_id in device_ids -%}
-      {%- set device=get_device_topic(device_id)|replace(' ','') -%}
-      {%- set ns.devices = ns.devices + [ device ~ '/custom/solar_power'] -%}
+      {%- set dev = get_device_topic(device_id) | replace(' ','') -%}
+      {%- set ns.devs = ns.devs + [ dev ] -%}
     {%- endfor -%}
-    {{ ns.devices }}
+    {{ ns.devs }}
 
   power_sensor: !input power_source
   sensor_unit: !input sensor_unit
 
-  # surowa wartość z sensora (kW lub W)
   raw_power: "{{ states[power_sensor].state | float(0) | abs }}"
-
-  # znormalizowana moc do W (jeśli sensor kW -> *1000)
   power_level: >-
     {% if sensor_unit == 'kW' %}
       {{ (raw_power * 1000) | round(0) }}
@@ -122,9 +147,8 @@ variables:
     {%- else -%}#FF4E1A
     {%- endif -%}
 
-  # formatowanie tekstu: jeśli > 1000 W, pokazujemy w kW
   power_level_text: >-
-    {%- if (power_level | float) > 1000 -%}
+    {%- if (power_level | float) >= 1000 -%}
       {{ ((power_level | float) / 1000) | round(1) }} kW
     {%- else -%}
       {{ (power_level | float) | round(0) }} W
@@ -133,8 +157,51 @@ variables:
   skip_if_zero_watts: !input skip_if_zero_watts
   skip_during_night_hours: !input skip_during_night_hours
 
-  payload: >-
-    {"icon":"{{ power_level_icon }}","text":"{{ power_level_text }}","color":"{{ power_level_color }}"}
+  display_mode: !input display_mode
+  show_duration_s: !input show_duration_s
+  app_lifetime_s: !input app_lifetime_s
+  app_repeat: !input app_repeat
+
+  # wybór topicu wg trybu
+  topic_suffix: >-
+    {% if display_mode == 'notify' %}/notify{% else %}/custom/solar_power{% endif %}
+  devices_topics: >-
+    {%- set ns = namespace(list=[]) -%}
+    {%- for base in devices_base_topics -%}
+      {%- set _ = ns.list.append(base ~ topic_suffix) -%}
+    {%- endfor -%}
+    {{ ns.list }}
+
+  # payloady dla 2 trybów: notify vs app
+  payload_notify: >-
+    {{
+      {
+        "icon": power_level_icon,
+        "text": power_level_text,
+        "color": power_level_color,
+        "duration": show_duration_s,  # ile sekund widoczny popup
+        "repeat": 1
+      } | tojson
+    }}
+
+  payload_app: >-
+    {{
+      {
+        "icon": power_level_icon,
+        "text": power_level_text,
+        "color": power_level_color,
+        "duration": show_duration_s,  # czas pojedynczego wyświetlenia
+        "repeat": app_repeat,         # ile razy w tej publikacji
+        "lifetime": app_lifetime_s    # jak długo appka ma żyć w kolejce
+      } | tojson
+    }}
+
+  payload_final: >-
+    {% if display_mode == 'notify' %}
+      {{ payload_notify }}
+    {% else %}
+      {{ payload_app }}
+    {% endif %}
 
   night_start: !input night_starts_after_time
   night_end: !input night_ends_after_time
@@ -165,13 +232,8 @@ action:
                     topic: "{{ repeat.item }}"
                     payload: '{}'
 
-      - alias: "Not skipping"
-        conditions:
-          - condition: template
-            value_template: >
-              {% set now_time = now().strftime("%H:%M") %}
-              {{ not ((skip_during_night_hours and ((now_time < night_end) or (now_time > night_start))) or
-                      (skip_if_zero_watts and (power_level | float == 0))) }}
+      - alias: "Show (notify/app)"
+        conditions: []
         sequence:
           - repeat:
               for_each: "{{ devices_topics }}"
@@ -181,4 +243,4 @@ action:
                     qos: 0
                     retain: false
                     topic: "{{ repeat.item }}"
-                    payload: "{{ payload }}"
+                    payload: "{{ payload_final }}"
