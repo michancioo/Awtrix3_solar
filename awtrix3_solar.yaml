@@ -1,15 +1,16 @@
 ---
 blueprint:
-  name: AWTRIX Solar Energy Monitor (AWTRIX 3) – W/kW + custom refresh
+  name: AWTRIX Solar Energy Monitor (AWTRIX 3) – dual sensor app (W/kW, alternating screens)
   description: >
-    Shows current solar energy on AWTRIX 3.
-    Uses icons 54156 (solar-green), 50557 (solar-white-dyn), 50546 (solar-static) that you need to install.
+    Wyświetla naprzemiennie dwie wartości PV w jednej appce AWTRIX 3 (multi-screen).
+    Sensor #1 może być w W lub kW (przeliczane do W na progi/kolory), Sensor #2 w kW (zawsze 2 miejsca po przecinku).
+    Ikony: 54156 (zielony), 50557 (biały dyn), 50546 (statyczny).
 
   domain: automation
   input:
     awtrix:
       name: AWTRIX Device
-      description: Select your AWTRIX 3 device (MQTT)
+      description: Wybierz urządzenie AWTRIX 3 (MQTT)
       selector:
         device:
           integration: mqtt
@@ -18,88 +19,167 @@ blueprint:
           multiple: true
 
     power_source:
-      name: Power Sensor
-      description: Sensor providing current power from your solar system.
+      name: Power Sensor (primary)
+      description: Sensor mocy PV #1 (W lub kW – wybierz jednostkę poniżej).
       selector:
         entity:
           domain: [sensor]
           multiple: false
 
     sensor_unit:
-      name: Sensor unit
-      description: W jakich jednostkach podaje wartość Twój sensor?
+      name: Unit for Power Sensor (primary)
+      description: W jakich jednostkach podaje wartość sensor #1?
       selector:
         select:
           options: [W, kW]
       default: W
 
-    threshold_high:
-      name: Threshold for high solar production (W)
+    secondary_power_source:
+      name: Power Sensor2 (kW, 2 decimals)
+      description: Sensor mocy PV #2 – zwraca kW (np. 4.23) z dwoma miejscami po przecinku.
       selector:
-        number: {min: 0, max: 100000, unit_of_measurement: Watt, mode: slider}
+        entity:
+          domain: [sensor]
+          multiple: false
+
+    threshold_high:
+      name: Threshold high (W)
+      description: Próg „wysokiej” produkcji (W).
+      selector:
+        number: {min: 0, max: 100000, unit_of_measurement: W, mode: slider}
       default: 400
 
     threshold_low:
-      name: Threshold for low solar production (W)
+      name: Threshold low (W)
+      description: Próg „niskiej” produkcji (W).
       selector:
-        number: {min: 0, max: 100000, unit_of_measurement: Watt, mode: slider}
+        number: {min: 0, max: 100000, unit_of_measurement: W, mode: slider}
       default: 100
 
     skip_if_zero_watts:
-      name: Hide solar production if at 0 Watts
+      name: Hide when 0 W
+      description: Nie wysyłaj na AWTRIX, gdy moc = 0 W (wg sensora #1 po normalizacji).
       selector: {boolean:}
       default: false
 
     skip_during_night_hours:
-      name: Hide solar production during night time
+      name: Hide during night time
+      description: Nie wysyłaj w godzinach nocnych.
       selector: {boolean:}
       default: false
 
     night_starts_after_time:
-      name: Night Time Start
+      name: Night start
       default: "00:00:00"
       selector: {time: {}}
 
     night_ends_after_time:
-      name: Night Time End
+      name: Night end
       default: "00:00:00"
       selector: {time: {}}
 
     refresh_minutes:
       name: Refresh pattern (minutes)
       description: |
-        Wzór dla pola `minutes:` w time_pattern. Przykłady:
-        - "/1"  → co minutę
+        Wzór dla `minutes:` w time_pattern.
+        Przykłady:
         - "/5"  → co 5 minut
-        - "0,15,30,45" → co kwadrans
+        - "0,15,30,45" → o podanych minutach każdej godziny
+      selector: {text: {multiline: false}}
+      default: "/5"
+
+    screen_duration_s:
+      name: Screen duration (seconds)
+      description: Ile sekund ma być widoczny każdy ekran (screen) wewnątrz appki.
       selector:
-        text:
-          multiline: false
-      default: "/1"
+        number: {min: 1, max: 60, unit_of_measurement: s, mode: slider}
+      default: 5
+
+    app_lifetime_s:
+      name: App lifetime in queue (seconds)
+      description: Jak długo appka ma żyć w kolejce rotacji AWTRIX (wygasa po czasie).
+      selector:
+        number: {min: 5, max: 600, unit_of_measurement: s, mode: slider}
+      default: 60
+
+    app_repeat:
+      name: App repeat count
+      description: Ile razy powtórzyć sekwencję ekranów przy jednym wysłaniu.
+      selector:
+        number: {min: 1, max: 10, mode: slider}
+      default: 1
+
+    test_run_now:
+      name: Test run now (force show)
+      description: Wymuś jednorazowe pokazanie przy „Uruchom akcje” (omija noc/zero W).
+      selector: {boolean:}
+      default: false
+
+    mqtt_topic_bases:
+      name: (Optional) MQTT base topics override
+      description: |
+        Ręczne prefixy MQTT Twoich AWTRIX (bez sufiksu /custom/solar_power),
+        np. `awtrix_34b184` albo `home/awtrix`. Jeśli puste — blueprint spróbuje wykryć automatycznie.
+      selector:
+        select:
+          multiple: true
+          custom_value: true
+          options: []
+      default: []
 
 mode: single
 
 variables:
   device_ids: !input awtrix
 
-  devices_topics: >-
-    {%- macro get_device_topic(device_id) -%}
-    {{ states((device_entities(device_id) | select('search','device_topic') | list)[0]) }}
-    {%- endmacro -%}
-    {%- set ns = namespace(devices=[]) -%}
-    {%- for device_id in device_ids -%}
-      {%- set device=get_device_topic(device_id)|replace(' ','') -%}
-      {%- set ns.devices = ns.devices + [ device ~ '/custom/solar_power'] -%}
-    {%- endfor -%}
-    {{ ns.devices }}
+  # Fallback: ręczne prefixy MQTT z inputa lub autodetekcja z encji HA
+  mqtt_topic_bases: !input mqtt_topic_bases
+  devices_base_topics: >-
+    {% if (mqtt_topic_bases | length) > 0 %}
+      {{ mqtt_topic_bases }}
+    {% else %}
+      {%- macro autodetect(device_id) -%}
+      {%- set ents = device_entities(device_id) | default([]) -%}
+      {%- set hit = ents | select('search','device_topic') | list | first -%}
+      {%- if hit %}
+        {{ states(hit) }}
+      {%- else %}
+        {%- set found = '' -%}
+        {%- for e in ents %}
+          {%- set dt = state_attr(e, 'device_topic') -%}
+          {%- if dt is not none %}
+            {%- set found = dt -%}{%- break -%}
+          {%- endif -%}
+        {%- endfor -%}
+        {{ found }}
+      {%- endif -%}
+      {%- endmacro -%}
+      {%- set ns = namespace(list=[]) -%}
+      {%- for device_id in device_ids -%}
+        {%- set base = autodetect(device_id) | trim -%}
+        {%- if base %}
+          {%- set _ = ns.list.append(base | replace(' ','')) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ ns.list }}
+    {% endif %}
 
+  # Używamy APP (rotacja): suffix /custom/solar_power
+  devices_topics: >-
+    {%- set ns = namespace(list=[]) -%}
+    {%- for base in devices_base_topics -%}
+      {%- set _ = ns.list.append(base ~ '/custom/solar_power') -%}
+    {%- endfor -%}
+    {{ ns.list }}
+
+  # Sensory
   power_sensor: !input power_source
   sensor_unit: !input sensor_unit
+  secondary_power_sensor: !input secondary_power_source
 
-  # surowa wartość z sensora (kW lub W)
+  # Sensor #1: surowo (kW lub W)
   raw_power: "{{ states[power_sensor].state | float(0) | abs }}"
-
-  # znormalizowana moc do W (jeśli sensor kW -> *1000)
+  # Normalizacja do W (progi i kolor liczona w W)
   power_level: >-
     {% if sensor_unit == 'kW' %}
       {{ (raw_power * 1000) | round(0) }}
@@ -107,9 +187,14 @@ variables:
       {{ raw_power | round(0) }}
     {% endif %}
 
+  # Sensor #2: zawsze kW, 2 miejsca po przecinku do wyświetlenia
+  secondary_raw_kw: "{{ states[secondary_power_sensor].state | float(0) | abs }}"
+  secondary_kw_text: "{{ '%.2f' | format(secondary_raw_kw) }} kW"
+
   threshold_low: !input threshold_low
   threshold_high: !input threshold_high
 
+  # Ikona/kolor wg sensor #1 po normalizacji do W
   power_level_icon: >-
     {%- if power_level | float > threshold_high | float -%}54156
     {%- elif power_level | float > threshold_low | float -%}50557
@@ -122,9 +207,9 @@ variables:
     {%- else -%}#FF4E1A
     {%- endif -%}
 
-  # formatowanie tekstu: jeśli > 1000 W, pokazujemy w kW
+  # Tekst dla sensora #1 (automatycznie W/kW)
   power_level_text: >-
-    {%- if (power_level | float) > 1000 -%}
+    {%- if (power_level | float) >= 1000 -%}
       {{ ((power_level | float) / 1000) | round(1) }} kW
     {%- else -%}
       {{ (power_level | float) | round(0) }} W
@@ -132,12 +217,38 @@ variables:
 
   skip_if_zero_watts: !input skip_if_zero_watts
   skip_during_night_hours: !input skip_during_night_hours
-
-  payload: >-
-    {"icon":"{{ power_level_icon }}","text":"{{ power_level_text }}","color":"{{ power_level_color }}"}
+  screen_duration_s: !input screen_duration_s
+  app_lifetime_s: !input app_lifetime_s
+  app_repeat: !input app_repeat
+  test_run_now: !input test_run_now
 
   night_start: !input night_starts_after_time
   night_end: !input night_ends_after_time
+
+  # --- NIGHT WINDOW EVAL (robust) ---
+  is_night_now: >-
+    {% set start_s = night_start|string %}
+    {% set end_s   = night_end|string %}
+    {% if start_s == end_s %}
+      false
+    {% else %}
+      {% set t_now   = now().time() %}
+      {% set t_start = strptime(start_s, "%H:%M:%S").time() %}
+      {% set t_end   = strptime(end_s,   "%H:%M:%S").time() %}
+      {% if t_start < t_end %}
+        {{ t_now >= t_start and t_now <= t_end }}
+      {% else %}
+        {{ t_now >= t_start or  t_now <= t_end }}
+      {% endif %}
+    {% endif %}
+
+  # PAYLOAD APP: multi-screen (naprzemiennie dwa ekrany)
+  payload_app: >-
+    {"screens":[
+      {"icon":{{ power_level_icon }},"text":"{{ power_level_text }}","color":"{{ power_level_color }}","duration":{{ screen_duration_s }}},
+      {"icon":{{ power_level_icon }},"text":"{{ secondary_kw_text }}","color":"{{ power_level_color }}","duration":{{ screen_duration_s }}}
+    ],
+    "repeat":{{ app_repeat }},"lifetime":{{ app_lifetime_s }}}
 
 trigger:
   - platform: time_pattern
@@ -151,9 +262,10 @@ action:
         conditions:
           - condition: template
             value_template: >
-              {% set now_time = now().strftime("%H:%M") %}
-              {{ (skip_during_night_hours and ((now_time < night_end) or (now_time > night_start))) or
-                 (skip_if_zero_watts and (power_level | float == 0)) }}
+              {{ (not test_run_now) and (
+                   (skip_during_night_hours and (is_night_now | bool)) or
+                   (skip_if_zero_watts and (power_level | float(0) == 0))
+              ) }}
         sequence:
           - repeat:
               for_each: "{{ devices_topics }}"
@@ -165,13 +277,14 @@ action:
                     topic: "{{ repeat.item }}"
                     payload: '{}'
 
-      - alias: "Not skipping"
+      - alias: "Show dual-screen app"
         conditions:
           - condition: template
             value_template: >
-              {% set now_time = now().strftime("%H:%M") %}
-              {{ not ((skip_during_night_hours and ((now_time < night_end) or (now_time > night_start))) or
-                      (skip_if_zero_watts and (power_level | float == 0))) }}
+              {{ test_run_now or not (
+                   (skip_during_night_hours and (is_night_now | bool)) or
+                   (skip_if_zero_watts and (power_level | float(0) == 0))
+              ) }}
         sequence:
           - repeat:
               for_each: "{{ devices_topics }}"
@@ -181,4 +294,4 @@ action:
                     qos: 0
                     retain: false
                     topic: "{{ repeat.item }}"
-                    payload: "{{ payload }}"
+                    payload: "{{ payload_app }}"
