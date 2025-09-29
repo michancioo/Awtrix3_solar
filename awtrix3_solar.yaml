@@ -2,15 +2,15 @@
 blueprint:
   name: AWTRIX Solar Energy Monitor (AWTRIX 3) – W/kW + custom refresh + notify/app
   description: >
-    Periodically shows solar power on AWTRIX 3.
-    Choose display mode: transient notify (popup) or app-in-rotation (with short lifetime).
-    Icons: 54156 (green), 50557 (white dyn), 50546 (static).
+    Okresowo pokazuje bieżącą moc PV na AWTRIX 3.
+    Wybierz tryb wyświetlania: powiadomienie (notify, jednorazowy popup) lub krótka aplikacja (app) z krótkim lifetime.
+    Ikony: 54156 (zielony), 50557 (biały dyn), 50546 (statyczny).
 
   domain: automation
   input:
     awtrix:
       name: AWTRIX Device
-      description: Select your AWTRIX 3 device (MQTT)
+      description: Wybierz swoje urządzenie AWTRIX 3 (MQTT)
       selector:
         device:
           integration: mqtt
@@ -20,6 +20,7 @@ blueprint:
 
     power_source:
       name: Power Sensor
+      description: Sensor mocy z instalacji PV.
       selector:
         entity:
           domain: [sensor]
@@ -27,6 +28,7 @@ blueprint:
 
     sensor_unit:
       name: Sensor unit
+      description: W jakich jednostkach podaje wartość Twój sensor?
       selector:
         select:
           options: [W, kW]
@@ -34,53 +36,58 @@ blueprint:
 
     threshold_high:
       name: Threshold for high solar production (W)
+      description: Próg dla „wysokiej” produkcji (w W).
       selector:
-        number: {min: 0, max: 100000, unit_of_measurement: Watt, mode: slider}
+        number: {min: 0, max: 100000, unit_of_measurement: W, mode: slider}
       default: 400
 
     threshold_low:
       name: Threshold for low solar production (W)
+      description: Próg dla „niskiej” produkcji (w W).
       selector:
-        number: {min: 0, max: 100000, unit_of_measurement: Watt, mode: slider}
+        number: {min: 0, max: 100000, unit_of_measurement: W, mode: slider}
       default: 100
 
     skip_if_zero_watts:
       name: Hide when 0 W
+      description: Nie wysyłaj na AWTRIX, gdy moc = 0 W.
       selector: {boolean:}
       default: false
 
     skip_during_night_hours:
       name: Hide during night time
+      description: Nie wysyłaj w godzinach nocnych.
       selector: {boolean:}
       default: false
 
     night_starts_after_time:
       name: Night start
+      description: Godzina rozpoczęcia „nocy”.
       default: "00:00:00"
       selector: {time: {}}
 
     night_ends_after_time:
       name: Night end
+      description: Godzina zakończenia „nocy”.
       default: "00:00:00"
       selector: {time: {}}
 
     refresh_minutes:
       name: Refresh pattern (minutes)
       description: |
-        Wzór dla `minutes:` w time_pattern. Przykłady:
+        Wzór dla pola `minutes:` w time_pattern.
+        Przykłady:
         - "/5"  → co 5 minut
-        - "0,15,30,45" → co kwadrans
+        - "0,15,30,45" → o podanych minutach każdej godziny
       selector: {text: {multiline: false}}
       default: "/5"
 
     display_mode:
       name: Display mode
-      description: notify = popup jednorazowy; app = krótko do rotacji (lifetime)
+      description: 'notify = popup jednorazowy; app = krótko dodane do rotacji (lifetime)'
       selector:
         select:
-          options:
-            - notify
-            - app
+          options: [notify, app]
       default: notify
 
     show_duration_s:
@@ -92,14 +99,14 @@ blueprint:
 
     app_lifetime_s:
       name: (app) Lifetime in queue (seconds)
-      description: Jak długo appka „żyje” w kolejce (po 1 wyświetleniu wygaśnie).
+      description: Jak długo appka „żyje” w kolejce (po wyświetleniu wygaśnie).
       selector:
         number: {min: 1, max: 300, unit_of_measurement: s, mode: slider}
       default: 20
 
     app_repeat:
       name: (app) Repeat count
-      description: Ile razy pokazać w jednej publikacji (zwykle 1).
+      description: Ile razy pokazać w ramach jednej publikacji.
       selector:
         number: {min: 1, max: 5, mode: slider}
       default: 1
@@ -109,7 +116,7 @@ mode: single
 variables:
   device_ids: !input awtrix
 
-  # z HA pobieramy device_topic każdej wybranej „żarówki”
+  # Pobranie device_topic z encji HA każdego wybranego urządzenia
   devices_base_topics: >-
     {%- macro get_device_topic(device_id) -%}
     {{ states((device_entities(device_id) | select('search','device_topic') | list)[0]) }}
@@ -124,7 +131,10 @@ variables:
   power_sensor: !input power_source
   sensor_unit: !input sensor_unit
 
+  # surowa wartość z sensora (kW lub W)
   raw_power: "{{ states[power_sensor].state | float(0) | abs }}"
+
+  # znormalizowana moc do W (jeśli sensor kW -> *1000)
   power_level: >-
     {% if sensor_unit == 'kW' %}
       {{ (raw_power * 1000) | round(0) }}
@@ -147,6 +157,7 @@ variables:
     {%- else -%}#FF4E1A
     {%- endif -%}
 
+  # tekst: jeśli >= 1000 W, pokazujemy w kW
   power_level_text: >-
     {%- if (power_level | float) >= 1000 -%}
       {{ ((power_level | float) / 1000) | round(1) }} kW
@@ -162,9 +173,11 @@ variables:
   app_lifetime_s: !input app_lifetime_s
   app_repeat: !input app_repeat
 
-  # wybór topicu wg trybu
+  # wybór suffixu topiku wg trybu
   topic_suffix: >-
     {% if display_mode == 'notify' %}/notify{% else %}/custom/solar_power{% endif %}
+
+  # kompletne topiki per urządzenie
   devices_topics: >-
     {%- set ns = namespace(list=[]) -%}
     {%- for base in devices_base_topics -%}
@@ -172,29 +185,12 @@ variables:
     {%- endfor -%}
     {{ ns.list }}
 
-  # payloady dla 2 trybów: notify vs app
+  # PAYLOADY jako czyste stringi JSON (bez tojson, żeby # w kolorze nie psuł składni)
   payload_notify: >-
-    {{
-      {
-        "icon": power_level_icon,
-        "text": power_level_text,
-        "color": power_level_color,
-        "duration": show_duration_s,  # ile sekund widoczny popup
-        "repeat": 1
-      } | tojson
-    }}
+    {"icon":{{ power_level_icon }},"text":"{{ power_level_text }}","color":"{{ power_level_color }}","duration":{{ show_duration_s }},"repeat":1}
 
   payload_app: >-
-    {{
-      {
-        "icon": power_level_icon,
-        "text": power_level_text,
-        "color": power_level_color,
-        "duration": show_duration_s,  # czas pojedynczego wyświetlenia
-        "repeat": app_repeat,         # ile razy w tej publikacji
-        "lifetime": app_lifetime_s    # jak długo appka ma żyć w kolejce
-      } | tojson
-    }}
+    {"icon":{{ power_level_icon }},"text":"{{ power_level_text }}","color":"{{ power_level_color }}","duration":{{ show_duration_s }},"repeat":{{ app_repeat }},"lifetime":{{ app_lifetime_s }}}
 
   payload_final: >-
     {% if display_mode == 'notify' %}
